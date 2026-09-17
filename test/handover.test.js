@@ -160,8 +160,7 @@ async function twoPeople(t, options) {
 
 test('the Vercel entry restores rewritten paths, reads pre-parsed bodies and stays in hosted mode', async t => {
   Object.assign(process.env, { VERCEL_PROJECT_PRODUCTION_URL: 'handover.example.app', VEYNS_CLIENT_ID: 'hosted-client' });
-  delete process.env.DATABASE_URL;
-  delete process.env.POSTGRES_URL;
+  for (const name of ['DATABASE_URL', 'STORAGE_URL', 'POSTGRES_URL', 'STORAGE_DATABASE_URL']) delete process.env[name];
   const { default: handler } = await import('../api/handler.js');
 
   const server = http.createServer(async (req, res) => {

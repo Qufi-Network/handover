@@ -11,7 +11,8 @@ const app = createApp({
   clientId: env.VEYNS_CLIENT_ID || '',
   backendSecret: env.VEYNS_BACKEND_SECRET || '',
   requirePalm: env.REQUIRE_PALM === 'true',
-  databaseUrl: env.DATABASE_URL || env.POSTGRES_URL || '',
+  // Neon on Vercel names the variable after the prefix chosen when connecting it (none, or STORAGE).
+  databaseUrl: env.DATABASE_URL || env.STORAGE_URL || env.POSTGRES_URL || env.STORAGE_DATABASE_URL || '',
   requireDatabaseUrl: true,
   holdSeconds: Number(env.HOLD_SECONDS || 86_400),
   graceSeconds: Number(env.GRACE_SECONDS || 300),

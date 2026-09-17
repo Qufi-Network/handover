@@ -31,7 +31,7 @@ If the console refuses a `localhost` origin, serve the app over HTTPS (for examp
 `public/` is served from Vercel's CDN. Every `/api/*` request goes to one function, `api/handler.js`, through the rewrite in `vercel.json`.
 
 1. `npx vercel login`, then `npx vercel deploy --prod` from this folder. Note the production address, for example `https://veyns-handover.vercel.app`.
-2. In the Vercel dashboard, open the project → **Storage** → create a **Neon** Postgres database and connect it. That adds `DATABASE_URL`, and the tables are created on first use.
+2. Add Neon from https://vercel.com/marketplace/neon and connect it to the project, with Production ticked and "Create database branch for deployment" unticked. Either custom prefix works: the app reads `DATABASE_URL` or `STORAGE_URL`. The tables are created on first use.
 3. In the Veyns console, register that exact address as the origin, the address plus `/` as the redirect URI, and ES256.
 4. Project → **Settings → Environment Variables**: add `VEYNS_CLIENT_ID`, and `VEYNS_BACKEND_SECRET` if you want palm approvals.
 5. Redeploy: `npx vercel deploy --prod`.

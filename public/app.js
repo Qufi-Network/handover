@@ -326,7 +326,7 @@ function renderMain() {
     const current = select.value;
     select.replaceChildren(
       el('option', { value: '' }, 'Choose someone'),
-      ...people.map(p => el('option', { value: p.id }, p.you ? `${p.name} (you)` : p.name)),
+      ...people.map(p => el('option', { value: p.id }, p.you ? `${p.name} (yourself, for testing)` : p.name)),
     );
     select.value = people.some(p => p.id === current) ? current : '';
   }
@@ -364,7 +364,7 @@ function ticket(t) {
       el('span', { class: 'num' }, fmt(t.amount)),
       el('span', { class: 'unit' }, 'credits')),
     el('div', { class: 'ticket-body' },
-      el('p', { class: 'ticket-who' }, incoming ? `From ${t.counterparty}` : `To ${t.counterparty}`),
+      el('p', { class: 'ticket-who' }, t.self ? 'Sent to yourself' : incoming ? `From ${t.counterparty}` : `To ${t.counterparty}`),
       t.note ? el('p', { class: 'ticket-note' }, `“${t.note}”`) : null,
       actions),
     ring(left / (t.holdSeconds || state.config.holdSeconds), left > 0 ? duration(left) : 'Closed', left > 0 ? 'left' : null));
@@ -401,7 +401,12 @@ function renderHistory(items) {
   }
   list.replaceChildren(...items.map(t => {
     const incoming = t.direction === 'in';
-    const what = {
+    const what = t.self ? {
+      accepted: 'Sent to yourself and accepted',
+      declined: 'Sent to yourself and declined',
+      recalled: 'Sent to yourself and recalled',
+      returned: 'Sent to yourself, not accepted in time',
+    }[t.status] : {
       accepted: incoming ? `Received from ${t.counterparty}` : `Handed to ${t.counterparty}`,
       declined: incoming ? `You declined ${t.counterparty}` : `Declined by ${t.counterparty}`,
       recalled: incoming ? `Recalled by ${t.counterparty}` : `Recalled from ${t.counterparty}`,
@@ -413,8 +418,9 @@ function renderHistory(items) {
       el('time', { datetime: new Date(t.closedAt * 1000).toISOString() }, when),
       el('span', { class: 'what' }, what, t.note ? el('em', {}, ` · “${t.note}”`) : null),
       el('span', { class: 'leader', 'aria-hidden': 'true' }),
-      el('span', { class: `amt ${accepted ? (incoming ? 'plus' : '') : 'void'}` },
-        accepted ? `${incoming ? '+' : '−'}${fmt(t.amount)}` : fmt(t.amount)));
+      // To yourself, nothing changes hands, so no sign.
+      el('span', { class: `amt ${accepted && !t.self ? (incoming ? 'plus' : '') : 'void'}` },
+        accepted && !t.self ? `${incoming ? '+' : '−'}${fmt(t.amount)}` : fmt(t.amount)));
   }));
 }
 

@@ -208,15 +208,17 @@ export function createApp(options) {
 
   const userView = user => ({ id: user.id, name: user.name, balance: user.balance });
 
-  function transferView(t, me) {
+  /** `direction` matters for a hand-over to yourself: it is incoming in one list and outgoing in the other. */
+  function transferView(t, me, direction = t.from_user === me.id ? 'out' : 'in') {
     const time = now();
-    const outgoing = t.from_user === me.id;
+    const outgoing = direction === 'out';
     return {
       id: t.id,
       amount: t.amount,
       note: t.note,
       status: t.status,
-      direction: outgoing ? 'out' : 'in',
+      direction,
+      self: t.from_user === t.to_user,
       counterparty: outgoing ? t.to_name : t.from_name,
       holdSeconds: t.hold_seconds ?? (t.sent_at == null ? null : t.expires_at - t.sent_at),
       sentAt: t.sent_at,
@@ -448,8 +450,9 @@ export function createApp(options) {
       now: now(),
       user: userView(user),
       people: people.map(p => ({ id: p.id, name: p.name, you: p.id === user.id })),
-      incoming: held.filter(t => t.to_user === user.id).map(t => transferView(t, user)),
-      outgoing: held.filter(t => t.from_user === user.id).map(t => transferView(t, user)),
+      // A hand-over to yourself is shown once, where it can be acted on: waiting for you to accept.
+      incoming: held.filter(t => t.to_user === user.id).map(t => transferView(t, user, 'in')),
+      outgoing: held.filter(t => t.from_user === user.id && t.to_user !== user.id).map(t => transferView(t, user, 'out')),
       history: closed.map(t => transferView(t, user)),
     };
   }

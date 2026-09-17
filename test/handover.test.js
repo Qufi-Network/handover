@@ -303,7 +303,21 @@ test('REQUIRE_PALM refuses browser sign-in and browser approvals', async t => {
   ok(await c.post(`/api/approvals/${approval.id}/palm`));
   env.issuer.approvePalm(env.issuer.log.created.at(-1).request_id);
   assert.equal(ok(await c.get(`/api/approvals/${approval.id}`)).approval.status, 'approved');
-  assert.equal(ok(await c.get('/api/me')).user.balance, 990);
+
+  // Sent to yourself: shown once, as waiting for you, so it can be accepted.
+  const view = ok(await c.get('/api/me'));
+  assert.equal(view.user.balance, 990);
+  assert.equal(view.outgoing.length, 0);
+  assert.equal(view.incoming.length, 1);
+  assert.equal(view.incoming[0].direction, 'in');
+  assert.equal(view.incoming[0].self, true);
+  assert.equal(view.incoming[0].canAccept, true);
+
+  const { approval: accept } = ok(await c.post(`/api/transfers/${view.incoming[0].id}/approval`));
+  ok(await c.post(`/api/approvals/${accept.id}/palm`));
+  env.issuer.approvePalm(env.issuer.log.created.at(-1).request_id);
+  assert.equal(ok(await c.get(`/api/approvals/${accept.id}`)).approval.status, 'approved');
+  assert.equal(ok(await c.get('/api/me')).user.balance, 1000);
 });
 
 test('a refused palm request says what was sent, keeps the approval open, and never doubles the prefix', async t => {

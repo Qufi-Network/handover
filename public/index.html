@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Handover</title>
+  <meta name="description" content="Hand credits to someone. They accept with Veyns, or you take them back.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Hanken+Grotesk:wght@400;500;600;700&family=Martian+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="top">
+    <a class="mark" href="/"><span class="mark-glyph" aria-hidden="true"></span>Handover</a>
+    <div class="who" id="who" hidden>
+      <span id="who-name"></span>
+      <button class="link" id="signout" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main id="view-loading" class="view narrow">
+    <p class="quiet" id="loading-text">Loading…</p>
+    <button class="btn ghost" id="retry" type="button" hidden>Try again</button>
+  </main>
+
+  <main id="view-setup" class="view narrow" hidden>
+    <p class="eyebrow">First run</p>
+    <h1>Connect Handover to Veyns</h1>
+    <ol class="steps">
+      <li>Open the <a id="console-link" target="_blank" rel="noopener">Veyns developer console</a> and sign in.</li>
+      <li>
+        Register an application with exactly these values:
+        <dl class="copy-list">
+          <div><dt>Application name</dt><dd><code id="copy-name">Handover</code><button class="link" type="button" data-copy="copy-name">Copy</button></dd></div>
+          <div><dt>Website origin</dt><dd><code id="setup-origin"></code><button class="link" type="button" data-copy="setup-origin">Copy</button></dd></div>
+          <div><dt>Redirect URI</dt><dd><code id="setup-redirect"></code><button class="link" type="button" data-copy="setup-redirect">Copy</button></dd></div>
+          <div><dt>ID token signature</dt><dd><code>ES256</code></dd></div>
+        </dl>
+      </li>
+      <li id="setup-paste">Paste the client ID it gives you.</li>
+      <li id="setup-env" hidden>Add it as <code>VEYNS_CLIENT_ID</code> in your hosting environment variables (Vercel → Settings → Environment Variables), then redeploy.</li>
+    </ol>
+    <form id="setup-form" class="stack">
+      <label for="client-id">Client ID</label>
+      <div class="row">
+        <input id="client-id" autocomplete="off" spellcheck="false" required>
+        <button class="btn ink" type="submit">Save</button>
+      </div>
+      <p class="error" id="setup-error" role="alert"></p>
+    </form>
+  </main>
+
+  <main id="view-signin" class="view split" hidden>
+    <section class="pitch">
+      <p class="eyebrow">Play money · Veyns sandbox</p>
+      <h1>Credits that wait <em>for a hand.</em></h1>
+      <p class="lede">Hand credits to someone. They have <span data-hold>24 hours</span> to accept with Veyns, or you take them back.</p>
+    </section>
+    <section class="card signin-card">
+      <p class="eyebrow">Sign in</p>
+      <button class="btn ink wide" id="signin-browser" type="button" disabled>Continue with Veyns</button>
+      <button class="btn ghost wide" id="signin-palm" type="button" disabled>Sign in with palm</button>
+      <p class="error" id="signin-error" role="alert"></p>
+      <p class="fine">Veyns opens in a small window. Handover only receives a private account key, never your palm or your device.</p>
+    </section>
+  </main>
+
+  <main id="view-name" class="view narrow" hidden>
+    <p class="eyebrow">Welcome</p>
+    <h1>What should people see?</h1>
+    <form id="name-form" class="stack">
+      <label for="name">Your name</label>
+      <div class="row">
+        <input id="name" maxlength="40" autocomplete="nickname" required>
+        <button class="btn ink" type="submit">Continue</button>
+      </div>
+      <p class="error" id="name-error" role="alert"></p>
+    </form>
+  </main>
+
+  <main id="view-main" class="view" hidden>
+    <section class="hero">
+      <div class="balance">
+        <p class="eyebrow">Your balance</p>
+        <p class="amount"><span id="balance">0</span><span class="unit">credits</span></p>
+        <p class="quiet" id="held-summary"></p>
+      </div>
+
+      <form id="send-form" class="card send">
+        <h2>Hand something over</h2>
+        <label for="send-to">To</label>
+        <select id="send-to" required></select>
+        <div class="two">
+          <div>
+            <label for="send-amount">Credits</label>
+            <input id="send-amount" type="number" min="1" step="1" inputmode="numeric" required>
+          </div>
+          <div>
+            <label for="send-note">Note <span class="optional">optional</span></label>
+            <input id="send-note" maxlength="80">
+          </div>
+        </div>
+        <button class="btn accent wide" type="submit">Review hand-over</button>
+        <p class="error" id="send-error" role="alert"></p>
+      </form>
+    </section>
+
+    <section class="lane">
+      <header class="lane-head"><h2>Waiting for you</h2><p class="quiet">Accept before the ring runs out.</p></header>
+      <div class="tickets" id="incoming"></div>
+    </section>
+
+    <section class="lane">
+      <header class="lane-head"><h2>In their hands</h2><p class="quiet">Recall opens when the window closes.</p></header>
+      <div class="tickets" id="outgoing"></div>
+    </section>
+
+    <section class="lane">
+      <header class="lane-head"><h2>Ledger</h2></header>
+      <ol class="ledger" id="history"></ol>
+    </section>
+  </main>
+
+  <dialog id="approval" aria-labelledby="approval-statement">
+    <div class="sheet">
+      <p class="eyebrow seal" id="approval-kind">Veyns approval</p>
+      <p class="statement" id="approval-statement"></p>
+      <dl class="details" id="approval-details"></dl>
+
+      <div class="actions" id="approval-choose">
+        <button class="btn ink" id="approve-browser" type="button">Approve with Veyns</button>
+        <button class="btn ghost" id="approve-palm" type="button" hidden>Approve with palm</button>
+      </div>
+
+      <div class="wait" id="approval-wait" hidden>
+        <span class="pulse" aria-hidden="true"></span>
+        <p id="approval-wait-text" aria-live="polite"></p>
+        <button class="link" id="approval-open" type="button" hidden>Show status window</button>
+      </div>
+
+      <p class="error" id="approval-error" role="alert"></p>
+      <div class="sheet-foot">
+        <p class="fine">Veyns shows this statement word for word. The approval only works for this exact action.</p>
+        <button class="link" id="approval-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+
+  <p class="toast" id="toast" role="status" aria-live="polite" hidden></p>
+</body>
+</html>

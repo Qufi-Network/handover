@@ -276,6 +276,30 @@ test('hand over with a browser approval, accept with a palm approval', async t =
   assert.equal(ok(await alice.get('/api/me')).history[0].status, 'accepted');
 });
 
+test('REQUIRE_PALM refuses browser sign-in and browser approvals', async t => {
+  const env = await start(t, { requirePalm: true });
+  const c = env.client();
+  assert.equal(ok(await c.get('/api/config')).requirePalm, true);
+
+  let { nonce } = ok(await c.post('/api/login/start'));
+  const browserLogin = await c.post('/api/login/finish', { token: env.issuer.token({ sub: 'sub-alice', nonce, veyns_intent: 'login' }) });
+  assert.equal(browserLogin.status, 401);
+  assert.match(browserLogin.body.error, /palm sign-in/);
+
+  ({ nonce } = ok(await c.post('/api/login/start')));
+  ok(await c.post('/api/login/finish', { token: env.issuer.token({ sub: 'sub-alice', nonce, veyns_intent: 'login', amr: ['veyns:palm'] }) }));
+  ok(await c.post('/api/profile', { name: 'Alice' }));
+  const aliceId = ok(await c.get('/api/me')).user.id;
+
+  const { approval } = ok(await c.post('/api/transfers', { to: aliceId, amount: 10 }));
+  assert.equal((await c.post(`/api/approvals/${approval.id}/browser`, { token: approvalToken(env, 'sub-alice', approval) })).status, 403);
+
+  ok(await c.post(`/api/approvals/${approval.id}/palm`));
+  env.issuer.approvePalm(env.issuer.log.created.at(-1).request_id);
+  assert.equal(ok(await c.get(`/api/approvals/${approval.id}`)).approval.status, 'approved');
+  assert.equal(ok(await c.get('/api/me')).user.balance, 990);
+});
+
 test('a palm decision that is not a palm scan is refused', async t => {
   const { env, alice, bob, bobId } = await twoPeople(t);
   const held = await sendAndApprove(env, alice, 'sub-alice', bobId, 100);

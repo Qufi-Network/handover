@@ -38,6 +38,20 @@ If the console refuses a `localhost` origin, serve the app over HTTPS (for examp
 
 The app uses the production domain as its origin (`VERCEL_PROJECT_PRODUCTION_URL`). Preview deployments are refused by the origin check, because Veyns only accepts the registered origin. Set `PUBLIC_ORIGIN` if you add a custom domain.
 
+## Palm approvals
+
+With `VEYNS_BACKEND_SECRET` set, every approval goes to palm first: the request reaches the person's Veyns app as soon as the review sheet opens. People without a scanner can still use the "approve in the browser instead" link. Set `REQUIRE_PALM=true` to remove that option: the server then refuses browser sign-in and browser approvals.
+
+Palm only works once Veyns staff have admitted the app and each account to the pilot. Until then, Veyns answers a palm request with "This authentication method is not available for the request."
+
+## Live check
+
+```bash
+npm run check:veyns -- https://handover-lac.vercel.app
+```
+
+This checks, against the real sandbox: discovery, signing keys, the deployed app's configuration and database, whether Veyns accepts the origin for browser sign-in, palm sign-in and approvals, and the backend credential (if `VEYNS_BACKEND_SECRET` is in a local `.env`). The sign-in and palm-scan ceremonies still need a real person.
+
 ## How it uses Veyns
 
 | Step | Veyns feature | Server checks |

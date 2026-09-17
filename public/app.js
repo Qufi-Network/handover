@@ -51,6 +51,8 @@ function holdText(seconds) {
 
 function friendly(error) {
   if (error?.code === 'popup_blocked') return 'Your browser blocked the Veyns window. Allow pop-ups for this site, then try again.';
+  // Veyns answers an unregistered origin with an HTML page, which the SDK fails to parse as JSON.
+  if (error instanceof SyntaxError) return `Veyns refused this site. Register ${location.origin} exactly as a website origin in the Veyns console.`;
   return error?.message || 'Something went wrong.';
 }
 
@@ -163,6 +165,9 @@ $('setup-form').addEventListener('submit', async event => {
 
 async function showSignin() {
   show('signin');
+  // When palm is required, palm is the only way in.
+  $('signin-browser').hidden = state.config.requirePalm;
+  $('signin-palm').className = `btn ${state.config.requirePalm ? 'ink' : 'ghost'} wide`;
   $('signin-browser').disabled = $('signin-palm').disabled = true;
   try {
     // Both must be ready before the click: the Veyns window has to open straight from the gesture.
@@ -385,21 +390,33 @@ function detailRows(details) {
 }
 
 function openApproval(approval, { discardOnCancel = false } = {}) {
+  const { palmEnabled, requirePalm } = state.config;
   active = { approval, discardOnCancel };
   $('approval-kind').textContent = approval.kind === 'send' ? 'Approve this hand-over' : 'Approve to accept';
   $('approval-statement').textContent = approval.statement;
   $('approval-details').replaceChildren(...detailRows(approval.details));
-  $('approve-palm').hidden = !state.config.palmEnabled;
-  $('approval-choose').classList.toggle('single', !state.config.palmEnabled);
+  $('approve-browser').hidden = requirePalm;
+  $('approve-palm').hidden = !palmEnabled;
+  $('approval-choose').classList.toggle('single', !palmEnabled || requirePalm);
   $('approval-error').textContent = '';
-  stage('choose');
   $('approval').showModal();
+
+  if (palmEnabled) {
+    // Palm first: the request goes to the person's Veyns app as soon as they review the action.
+    startPalm(active);
+  } else if (requirePalm) {
+    $('approval-error').textContent = 'Palm approval is not set up on this site yet.';
+    stage('closed');
+  } else {
+    stage('choose');
+  }
 }
 
 function stage(name, text = '') {
   $('approval-choose').hidden = name !== 'choose';
   $('approval-wait').hidden = name !== 'wait' && name !== 'palm';
   $('approval-open').hidden = name !== 'palm';
+  $('approval-browser-instead').hidden = name !== 'palm' || state.config.requirePalm;
   $('approval-wait-text').textContent = text;
   $('approval-cancel').textContent = name === 'closed' ? 'Close' : 'Cancel';
 }
@@ -413,10 +430,11 @@ async function afterFailure(current, error) {
   stage(latest?.approval.status === 'open' ? 'choose' : 'closed');
 }
 
-$('approve-browser').addEventListener('click', async () => {
+async function approveInBrowser() {
   const current = active;
   if (!current || !window.veyns) return;
   const { approval } = current;
+  const hadPalmRequest = Boolean(approval.approvalUrl);
   $('approval-error').textContent = '';
   stage('wait', 'Finish in the Veyns window.');
   try {
@@ -429,28 +447,34 @@ $('approve-browser').addEventListener('click', async () => {
     settled(current, result.approval);
   } catch (error) {
     if (error.code === 'cancelled') {
-      if (active === current) stage('choose');
+      // Closing the browser window returns to the palm request, which is still waiting.
+      if (active === current) stage(hadPalmRequest ? 'palm' : 'choose', hadPalmRequest ? PALM_WAITING : '');
       return;
     }
     afterFailure(current, error);
   }
-});
+}
 
-$('approve-palm').addEventListener('click', async () => {
-  const current = active;
-  if (!current) return;
+const PALM_WAITING = 'Open Veyns on your phone, check the request and scan your palm.';
+
+async function startPalm(current) {
+  if (!current || active !== current) return;
   $('approval-error').textContent = '';
   stage('wait', 'Sending the request to your Veyns app…');
   try {
     const { approval } = await api(`/api/approvals/${current.approval.id}/palm`, {});
     if (active !== current) return;
     current.approval = approval;
-    stage('palm', 'Open Veyns on your phone, check the request and scan your palm.');
+    stage('palm', PALM_WAITING);
     pollPalm(current);
   } catch (error) {
     afterFailure(current, error);
   }
-});
+}
+
+$('approve-browser').addEventListener('click', approveInBrowser);
+$('approval-browser-instead').addEventListener('click', approveInBrowser);
+$('approve-palm').addEventListener('click', () => startPalm(active));
 
 $('approval-open').addEventListener('click', () => {
   if (active?.approval.approvalUrl) window.open(active.approval.approvalUrl, 'veyns-approval', 'popup=yes,width=420,height=640,noopener');

@@ -22,6 +22,7 @@ const app = createApp({
   issuer: (env.VEYNS_ISSUER || 'https://sandbox.id.veyns.io').replace(/\/$/, ''),
   clientId: env.VEYNS_CLIENT_ID || '',
   backendSecret: env.VEYNS_BACKEND_SECRET || '',
+  requirePalm: env.REQUIRE_PALM === 'true',
   // Without DATABASE_URL, a local PGlite database lives in data/pgdata.
   databaseUrl: env.DATABASE_URL || '',
   holdSeconds: Number(env.HOLD_SECONDS || 86_400),

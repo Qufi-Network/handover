@@ -10,6 +10,7 @@ const app = createApp({
   issuer: (env.VEYNS_ISSUER || 'https://sandbox.id.veyns.io').replace(/\/$/, ''),
   clientId: env.VEYNS_CLIENT_ID || '',
   backendSecret: env.VEYNS_BACKEND_SECRET || '',
+  requirePalm: env.REQUIRE_PALM === 'true',
   databaseUrl: env.DATABASE_URL || env.POSTGRES_URL || '',
   requireDatabaseUrl: true,
   holdSeconds: Number(env.HOLD_SECONDS || 86_400),

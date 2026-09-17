@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "check:veyns": "node scripts/check-veyns.js"
   },
   "dependencies": {
     "pg": "^8.23.0"

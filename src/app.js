@@ -131,6 +131,7 @@ export function createApp(options) {
     dataDir = null,
     publicDir = null,
     backendSecret = '',
+    requirePalm = false,
     holdSeconds = 86_400,
     graceSeconds = 300,
     startingCredits = 1000,
@@ -355,6 +356,7 @@ export function createApp(options) {
       publicOrigin,
       redirectUri: `${publicOrigin}/`,
       palmEnabled: veyns.palmEnabled(),
+      requirePalm,
       holdSeconds,
       graceSeconds,
     };
@@ -392,6 +394,7 @@ export function createApp(options) {
     if (claims.nonce !== pending.nonce) throw new HttpError(401, 'That sign-in did not start in this browser. Please try again.');
     if (claims.veyns_intent !== 'login') throw new HttpError(401, 'That token is not a sign-in.');
     if (!isFresh(claims.auth_time, time - LOGIN_SECONDS, time)) throw new HttpError(401, 'That sign-in is too old. Please try again.');
+    if (requirePalm && !(claims.amr || []).includes('veyns:palm')) throw new HttpError(401, 'This app requires palm sign-in.');
 
     await query('insertUser', randomId(12), claims.sub, startingCredits, time);
     const user = await one('userBySub', claims.sub);
@@ -521,6 +524,7 @@ export function createApp(options) {
     }
 
     // Browser approval: the SDK already checked the token, but the browser is not trusted.
+    if (requirePalm) throw new HttpError(403, 'This app requires palm approval.');
     const claims = await veyns.verifyToken(body.token);
     const time = now();
     const problem =

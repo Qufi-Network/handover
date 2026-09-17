@@ -147,8 +147,8 @@ const approvalToken = (env, sub, approval, extra = {}) => env.issuer.token({
   ...extra,
 });
 
-async function sendAndApprove(env, from, fromSub, toId, amount) {
-  const { approval } = ok(await from.post('/api/transfers', { to: toId, amount }));
+async function sendAndApprove(env, from, fromSub, toId, amount, holdSeconds) {
+  const { approval } = ok(await from.post('/api/transfers', { to: toId, amount, holdSeconds }));
   const { transfer } = ok(await from.post(`/api/approvals/${approval.id}/browser`, { token: approvalToken(env, fromSub, approval) }));
   return transfer;
 }
@@ -244,8 +244,11 @@ test('hand over with a browser approval, accept with a palm approval', async t =
   const { env, alice, bob, bobId } = await twoPeople(t);
 
   const { approval } = ok(await alice.post('/api/transfers', { to: bobId, amount: 250, note: 'lunch' }));
-  assert.equal(approval.statement, 'Hand over 250 credits to Bob');
-  assert.deepEqual(approval.details, { transfer: approval.transferId, amount: 250, unit: 'credits', to: 'Bob', accept_within: '24 hours', note: 'lunch' });
+  assert.equal(approval.statement, 'Hand over 250 credits to Bob, returned to you if not accepted within 24 hours');
+  assert.deepEqual(approval.details, {
+    transfer: approval.transferId, amount: 250, unit: 'credits', to: 'Bob',
+    accept_within: '24 hours', accept_within_seconds: 86_400, if_not_accepted: 'returned to sender', note: 'lunch',
+  });
 
   const wrongAction = approvalToken(env, 'sub-alice', { ...approval, statement: 'Hand over 9,999 credits to Bob' });
   assert.equal((await alice.post(`/api/approvals/${approval.id}/browser`, { token: wrongAction })).status, 401);
@@ -344,22 +347,50 @@ test('a palm decision that is not a palm scan is refused', async t => {
   assert.equal(ok(await bob.get('/api/me')).user.balance, 1000);
 });
 
-test('the receiver has the window; the sender can recall only after it', async t => {
+test('the sender chooses 1, 5, 10 or 24 hours, and the choice is signed', async t => {
   const { env, alice, bob, bobId } = await twoPeople(t);
-  const held = await sendAndApprove(env, alice, 'sub-alice', bobId, 100);
+  const config = ok(await alice.get('/api/config'));
+  assert.deepEqual(config.holdOptions.map(o => o.label), ['1 hour', '5 hours', '10 hours', '24 hours']);
 
-  assert.equal((await alice.post(`/api/transfers/${held.id}/recall`)).status, 409);
-  env.advance(86_400);
+  assert.equal((await alice.post('/api/transfers', { to: bobId, amount: 10, holdSeconds: 7200 })).status, 400);
+
+  const { approval } = ok(await alice.post('/api/transfers', { to: bobId, amount: 10, holdSeconds: 3600 }));
+  assert.equal(approval.statement, 'Hand over 10 credits to Bob, returned to you if not accepted within 1 hour');
+  assert.equal(approval.details.accept_within_seconds, 3600);
+  const { transfer } = ok(await alice.post(`/api/approvals/${approval.id}/browser`, { token: approvalToken(env, 'sub-alice', approval) }));
+  assert.equal(transfer.expiresAt - transfer.sentAt, 3600);
+  assert.equal(transfer.holdSeconds, 3600);
+
+  const { approval: accept } = ok(await bob.post(`/api/transfers/${transfer.id}/approval`));
+  assert.equal(accept.details.accept_by, new Date(transfer.expiresAt * 1000).toISOString());
+});
+
+test('unaccepted credits return to the sender automatically after the window', async t => {
+  const { env, alice, bob, bobId } = await twoPeople(t);
+  const held = await sendAndApprove(env, alice, 'sub-alice', bobId, 100, 5 * 3600);
+  assert.equal(ok(await alice.get('/api/me')).user.balance, 900);
+
+  // Bob opens a palm request but never scans.
+  const { approval } = ok(await bob.post(`/api/transfers/${held.id}/approval`));
+  ok(await bob.post(`/api/approvals/${approval.id}/palm`));
+
+  env.advance(5 * 3600);
   assert.equal((await bob.post(`/api/transfers/${held.id}/approval`)).status, 409, 'window closed for accepting');
-  assert.equal((await alice.post(`/api/transfers/${held.id}/recall`)).status, 409, 'grace period still running');
-  env.advance(300);
-  ok(await alice.post(`/api/transfers/${held.id}/recall`));
-  assert.equal((await alice.post(`/api/transfers/${held.id}/recall`)).status, 409);
+  assert.equal(ok(await alice.get('/api/me')).user.balance, 900, 'nothing returns during the grace period');
 
+  env.advance(300);
   const aliceView = ok(await alice.get('/api/me'));
   assert.equal(aliceView.user.balance, 1000);
-  assert.equal(aliceView.history[0].status, 'recalled');
+  assert.equal(aliceView.outgoing.length, 0);
+  assert.equal(aliceView.history[0].status, 'returned');
   assert.equal(ok(await bob.get('/api/me')).incoming.length, 0);
+  assert.equal(ok(await bob.get(`/api/approvals/${approval.id}`)).approval.status, 'cancelled');
+  assert.ok(env.issuer.log.cancelled.includes(env.issuer.log.created.at(-1).request_id), 'the pending palm request is cancelled at Veyns');
+
+  // Returned exactly once, however many requests arrive afterwards.
+  ok(await alice.get('/api/me'));
+  ok(await bob.get('/api/me'));
+  assert.equal(ok(await alice.get('/api/me')).user.balance, 1000);
 });
 
 test('an approval finished before the deadline still lands during the grace period', async t => {
@@ -373,7 +404,9 @@ test('an approval finished before the deadline still lands during the grace peri
   ok(await bob.post(`/api/approvals/${approval.id}/browser`, { token }));
   assert.equal(ok(await bob.get('/api/me')).user.balance, 1100);
   env.advance(300);
-  assert.equal((await alice.post(`/api/transfers/${held.id}/recall`)).status, 409);
+  const aliceView = ok(await alice.get('/api/me'));
+  assert.equal(aliceView.user.balance, 900, 'an accepted hand-over is never returned');
+  assert.equal(aliceView.history[0].status, 'accepted');
 });
 
 test('declining returns the credits at once; overspending is refused', async t => {

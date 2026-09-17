@@ -59,7 +59,7 @@
     <section class="pitch">
       <p class="eyebrow">Play money · Veyns sandbox</p>
       <h1>Credits that wait <em>for a hand.</em></h1>
-      <p class="lede">Hand credits to someone. They have <span data-hold>24 hours</span> to accept with Veyns, or you take them back.</p>
+      <p class="lede">Hand credits to someone and choose how long they have to accept with Veyns. If they don't, the credits come back to you.</p>
     </section>
     <section class="card signin-card">
       <p class="eyebrow">Sign in</p>
@@ -105,6 +105,11 @@
             <input id="send-note" maxlength="80">
           </div>
         </div>
+        <fieldset class="windows">
+          <legend>They must accept within</legend>
+          <div class="window-options" id="send-window"></div>
+          <p class="fine">If they don't accept in time, the credits come back to you automatically. This rule is part of what you sign.</p>
+        </fieldset>
         <button class="btn accent wide" type="submit">Review hand-over</button>
         <p class="error" id="send-error" role="alert"></p>
       </form>
@@ -116,7 +121,7 @@
     </section>
 
     <section class="lane">
-      <header class="lane-head"><h2>In their hands</h2><p class="quiet">Recall opens when the window closes.</p></header>
+      <header class="lane-head"><h2>In their hands</h2><p class="quiet">Anything not accepted in time comes back to you.</p></header>
       <div class="tickets" id="outgoing"></div>
     </section>
 

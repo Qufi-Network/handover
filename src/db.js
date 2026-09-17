@@ -28,7 +28,7 @@ const SCHEMA = [
     to_user    TEXT NOT NULL REFERENCES users(id),
     amount     INTEGER NOT NULL CHECK (amount > 0),
     note       TEXT NOT NULL DEFAULT '',
-    status     TEXT NOT NULL CHECK (status IN ('draft', 'held', 'accepted', 'declined', 'recalled', 'discarded')),
+    status     TEXT NOT NULL,                     -- allowed values: constraint transfers_status_v2 below
     created_at BIGINT NOT NULL,
     sent_at    BIGINT,
     expires_at BIGINT,
@@ -55,6 +55,16 @@ const SCHEMA = [
     created_at   BIGINT NOT NULL,
     closed_at    BIGINT
   )`,
+  // v2: the sender picks the accept window, and unaccepted credits return automatically.
+  'ALTER TABLE transfers ADD COLUMN IF NOT EXISTS hold_seconds INTEGER',
+  `DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'transfers_status_v2') THEN
+      ALTER TABLE transfers DROP CONSTRAINT IF EXISTS transfers_status_check;
+      ALTER TABLE transfers ADD CONSTRAINT transfers_status_v2
+        CHECK (status IN ('draft', 'held', 'accepted', 'declined', 'recalled', 'returned', 'discarded'));
+    END IF;
+  END $$`,
+  'CREATE INDEX IF NOT EXISTS transfers_expiry ON transfers (status, expires_at)',
   'CREATE INDEX IF NOT EXISTS transfers_from ON transfers (from_user, status)',
   'CREATE INDEX IF NOT EXISTS transfers_to ON transfers (to_user, status)',
   'CREATE INDEX IF NOT EXISTS approvals_transfer ON approvals (transfer_id, status)',
@@ -85,17 +95,21 @@ async function openPostgres(url) {
   return {
     query: async (text, params) => wrap(await pool.query(text, params)),
     async transaction(fn) {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        const result = await fn(async (text, params) => wrap(await client.query(text, params)));
-        await client.query('COMMIT');
-        return result;
-      } catch (error) {
-        await client.query('ROLLBACK').catch(() => {});
-        throw error;
-      } finally {
-        client.release();
+      for (let attempt = 1; ; attempt++) {
+        const client = await pool.connect();
+        try {
+          await client.query('BEGIN');
+          const result = await fn(async (text, params) => wrap(await client.query(text, params)));
+          await client.query('COMMIT');
+          return result;
+        } catch (error) {
+          await client.query('ROLLBACK').catch(() => {});
+          // Lock order makes deadlocks unlikely; if Postgres still picks this transaction as the victim, run it again.
+          if (error?.code === '40P01' && attempt < 3) continue;
+          throw error;
+        } finally {
+          client.release();
+        }
       }
     },
     close: () => pool.end(),

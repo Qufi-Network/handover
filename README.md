@@ -62,7 +62,9 @@ This checks, against the real sandbox: discovery, signing keys, the deployed app
 
 Each hand-over's statement and details are built and stored on the server. The browser never decides what gets approved. Claiming the approval, moving the balance and changing the hand-over state happen in one Postgres transaction. Each step is a conditional update whose row count is checked. So a replayed approval can't run twice, and an accept racing a recall on another server instance can't both succeed.
 
-The receiver has `HOLD_SECONDS`, judged by when they approved. Recall opens `GRACE_SECONDS` after that, so an approval finished just in time still lands. To try recall quickly, set `HOLD_SECONDS=120` and `GRACE_SECONDS=10`.
+The sender chooses how long the receiver has to accept: 1, 5, 10 or 24 hours. The choice is written into the statement the sender approves, e.g. "Hand over 10 credits to Bob, returned to you if not accepted within 5 hours". It is also in the signed details (`accept_within_seconds`, `if_not_accepted`), so the sender's Veyns signature (palm or browser) covers the return rule. The receiver's approval carries the deadline as `accept_by`.
+
+Whether the receiver made it in time is judged by when they approved. Once the window plus `GRACE_SECONDS` (default 300) has passed, the credits return to the sender automatically. This runs before every signed-in request as one conditional update, so no scheduler is needed and each hand-over returns exactly once. Any palm request still waiting at Veyns is cancelled. `HOLD_SECONDS` sets the default choice; a value that isn't one of the four (e.g. `120` for testing) is offered as an extra option.
 
 ## Test
 

@@ -42,13 +42,6 @@ function duration(seconds) {
   return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
 }
 
-function holdText(seconds) {
-  const plural = (n, unit) => `${n} ${unit}${n === 1 ? '' : 's'}`;
-  if (seconds % 3600 === 0) return plural(seconds / 3600, 'hour');
-  if (seconds % 60 === 0) return plural(seconds / 60, 'minute');
-  return plural(seconds, 'second');
-}
-
 function friendly(error) {
   if (error?.code === 'popup_blocked') return 'Your browser blocked the Veyns window. Allow pop-ups for this site, or approve with palm.';
   // Veyns answers an unregistered origin with an HTML page, which the SDK fails to parse as JSON.
@@ -94,7 +87,6 @@ async function boot() {
   $('retry').hidden = true;
   try {
     state.config = await api('/api/config');
-    document.querySelectorAll('[data-hold]').forEach(node => { node.textContent = holdText(state.config.holdSeconds); });
     if (!state.config.configured) return showSetup();
     loadSdk().catch(() => {});
     let redirectError = '';
@@ -339,6 +331,7 @@ function renderMain() {
     select.value = people.some(p => p.id === current) ? current : '';
   }
   $('send-amount').max = String(user.balance);
+  renderWindowOptions();
 
   renderTickets($('incoming'), incoming, 'Nothing is waiting for you.');
   renderTickets($('outgoing'), outgoing, 'Nothing is out right now.');
@@ -357,11 +350,13 @@ function ticket(t) {
 
   if (incoming) {
     if (left > 0) actions.append(button('Accept', 'btn accent small', () => accept(t)));
+    else actions.append(el('span', { class: 'quiet' }, `Too late to accept: returning to ${t.counterparty}`));
     actions.append(button('Decline', 'btn ghost small', () => decline(t)));
-  } else if (now >= t.recallAt) {
-    actions.append(button('Recall', 'btn ink small', () => recall(t)));
   } else {
-    actions.append(el('span', { class: 'quiet' }, `Recall opens in ${duration(t.recallAt - now)}`));
+    const back = t.returnsAt - now;
+    actions.append(el('span', { class: 'quiet' }, back > 0
+      ? `Comes back to you in ${duration(back)} if not accepted`
+      : 'Coming back to you…'));
   }
 
   return el('article', { class: `ticket ${incoming ? 'in' : 'out'}` },
@@ -372,7 +367,7 @@ function ticket(t) {
       el('p', { class: 'ticket-who' }, incoming ? `From ${t.counterparty}` : `To ${t.counterparty}`),
       t.note ? el('p', { class: 'ticket-note' }, `“${t.note}”`) : null,
       actions),
-    ring(left / state.config.holdSeconds, left > 0 ? duration(left) : 'Closed', left > 0 ? 'left' : null));
+    ring(left / (t.holdSeconds || state.config.holdSeconds), left > 0 ? duration(left) : 'Closed', left > 0 ? 'left' : null));
 }
 
 function ring(fraction, label, sub) {
@@ -410,6 +405,7 @@ function renderHistory(items) {
       accepted: incoming ? `Received from ${t.counterparty}` : `Handed to ${t.counterparty}`,
       declined: incoming ? `You declined ${t.counterparty}` : `Declined by ${t.counterparty}`,
       recalled: incoming ? `Recalled by ${t.counterparty}` : `Recalled from ${t.counterparty}`,
+      returned: incoming ? `Not accepted in time, returned to ${t.counterparty}` : `${t.counterparty} didn't accept in time, returned to you`,
     }[t.status];
     const accepted = t.status === 'accepted';
     const when = new Date(t.closedAt * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -432,6 +428,7 @@ $('send-form').addEventListener('submit', async event => {
       to: $('send-to').value,
       amount: Number($('send-amount').value),
       note: $('send-note').value,
+      holdSeconds: Number(new FormData($('send-form')).get('window')),
     });
     openApproval(approval, { discardOnCancel: true });
   } catch (error) {
@@ -462,28 +459,35 @@ async function decline(t) {
   refresh().catch(() => {});
 }
 
-async function recall(t) {
-  try {
-    await api(`/api/transfers/${t.id}/recall`, {});
-    toast(`${fmt(t.amount)} credits are back with you.`);
-  } catch (error) {
-    toast(friendly(error));
-  }
-  refresh().catch(() => {});
-}
-
 /* ----------------------------------------------------------- approval */
 
-const DETAIL_LABELS = { amount: 'Amount', to: 'To', from: 'From', accept_within: 'Accept within', note: 'Note', transfer: 'Reference' };
+const DETAIL_LABELS = {
+  amount: 'Amount', to: 'To', from: 'From', accept_within: 'Accept within', accept_by: 'Accept by',
+  if_not_accepted: 'If not accepted', note: 'Note', transfer: 'Reference',
+};
+// Machine-readable duplicates of rows shown above (still part of the signed digest).
+const DETAIL_HIDDEN = new Set(['unit', 'accept_within_seconds']);
 
-/** Every signed detail is shown; known ones first, the amount together with its unit. */
+/** Signed details, known ones first; the amount with its unit, deadlines in local time. */
 function detailRows(details) {
   const known = Object.keys(DETAIL_LABELS).filter(key => key in details);
-  const rest = Object.keys(details).filter(key => !(key in DETAIL_LABELS) && key !== 'unit');
+  const rest = Object.keys(details).filter(key => !(key in DETAIL_LABELS) && !DETAIL_HIDDEN.has(key));
   return [...known, ...rest].map(key => {
-    const value = key === 'amount' ? `${fmt(details.amount)} ${details.unit ?? ''}`.trim() : String(details[key]);
+    const value = key === 'amount' ? `${fmt(details.amount)} ${details.unit ?? ''}`.trim()
+      : key === 'accept_by' ? new Date(details.accept_by).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+      : String(details[key]);
     return el('div', {}, el('dt', {}, DETAIL_LABELS[key] || key), el('dd', {}, value));
   });
+}
+
+/** The 1 / 5 / 10 / 24 hour choices come from the server, which only accepts those. */
+function renderWindowOptions() {
+  const container = $('send-window');
+  if (container.childElementCount) return;
+  const { holdOptions, holdSeconds } = state.config;
+  container.replaceChildren(...holdOptions.map(option => el('label', { class: 'window-option' },
+    el('input', { type: 'radio', name: 'window', value: String(option.seconds), checked: option.seconds === holdSeconds }),
+    el('span', {}, option.label))));
 }
 
 function openApproval(approval, { discardOnCancel = false } = {}) {

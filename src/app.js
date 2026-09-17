@@ -10,6 +10,7 @@ const LOGIN_COOKIE = 'handover_login';
 const SESSION_SECONDS = 7 * 24 * 3600;
 const LOGIN_SECONDS = 300;
 const PALM_REQUEST_SECONDS = 300;
+const STANDARD_HOLD_OPTIONS = [3600, 5 * 3600, 10 * 3600, 24 * 3600];
 
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -24,7 +25,7 @@ const TRANSFER_SELECT = `
   FROM transfers t JOIN users f ON f.id = t.from_user JOIN users r ON r.id = t.to_user`;
 
 // Every state change below is a conditional UPDATE whose row count is checked, so two
-// instances racing on the same hand-over (accept vs. recall, a replayed approval) cannot both win.
+// instances racing on the same hand-over (accept vs. automatic return, a replayed approval) cannot both win.
 const SQL = {
   userBySub: 'SELECT * FROM users WHERE sub = $1',
   userById: 'SELECT * FROM users WHERE id = $1',
@@ -44,14 +45,25 @@ const SQL = {
 
   transferById: `${TRANSFER_SELECT} WHERE t.id = $1`,
   heldFor: `${TRANSFER_SELECT} WHERE t.status = 'held' AND (t.from_user = $1 OR t.to_user = $1) ORDER BY t.expires_at`,
-  closedFor: `${TRANSFER_SELECT} WHERE t.status IN ('accepted', 'declined', 'recalled')
+  closedFor: `${TRANSFER_SELECT} WHERE t.status IN ('accepted', 'declined', 'recalled', 'returned')
               AND (t.from_user = $1 OR t.to_user = $1) ORDER BY t.closed_at DESC LIMIT 30`,
-  insertTransfer: `INSERT INTO transfers (id, from_user, to_user, amount, note, status, created_at)
-                   VALUES ($1, $2, $3, $4, $5, 'draft', $6)`,
+  insertTransfer: `INSERT INTO transfers (id, from_user, to_user, amount, note, hold_seconds, status, created_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, 'draft', $7)`,
   discardDrafts: `UPDATE transfers SET status = 'discarded', closed_at = $1 WHERE from_user = $2 AND status = 'draft' RETURNING id`,
   closeTransfer: 'UPDATE transfers SET status = $1, closed_at = $2 WHERE id = $3 AND status = $4',
-  markHeld: `UPDATE transfers SET status = 'held', sent_at = $1, expires_at = $2
+  // The window is the one the sender chose when the draft (and its signed statement) was made.
+  markHeld: `UPDATE transfers SET status = 'held', sent_at = $1::bigint, expires_at = $1::bigint + COALESCE(hold_seconds, $2::int)
              WHERE id = $3 AND status = 'draft' RETURNING amount, from_user`,
+  // Closed windows, past the grace period: each row can be returned exactly once, by whichever request gets there first.
+  returnExpired: `UPDATE transfers SET status = 'returned', closed_at = $1::bigint
+                  WHERE status = 'held' AND expires_at + $2::int <= $1::bigint RETURNING id, amount, from_user`,
+  // Lock order everywhere is approvals, then transfers, then users, so concurrent requests cannot deadlock.
+  cancelExpiredApprovals: `UPDATE approvals SET status = 'cancelled', closed_at = $1::bigint WHERE status = 'open'
+                           AND transfer_id IN (SELECT id FROM transfers WHERE status = 'held' AND expires_at + $2::int <= $1::bigint)
+                           RETURNING request_id`,
+  cancelDraftApprovals: `UPDATE approvals SET status = 'cancelled', closed_at = $1 WHERE status = 'open'
+                         AND transfer_id IN (SELECT id FROM transfers WHERE from_user = $2 AND status = 'draft')
+                         RETURNING request_id`,
   markAccepted: `UPDATE transfers SET status = 'accepted', closed_at = $1
                  WHERE id = $2 AND status = 'held' AND expires_at > $3 RETURNING amount, to_user`,
 
@@ -77,13 +89,6 @@ function humanDuration(seconds) {
   if (seconds % 3600 === 0) return plural(seconds / 3600, 'hour');
   if (seconds % 60 === 0) return plural(seconds / 60, 'minute');
   return plural(seconds, 'second');
-}
-
-function inAbout(seconds) {
-  if (seconds < 90) return 'in about a minute';
-  if (seconds < 3600) return `in ${Math.ceil(seconds / 60)} minutes`;
-  const hours = Math.floor(seconds / 3600);
-  return `in ${hours}h ${Math.ceil((seconds % 3600) / 60)}m`;
 }
 
 function parseCookies(header = '') {
@@ -139,6 +144,10 @@ export function createApp(options) {
     fetchImpl = globalThis.fetch,
     log = console,
   } = options;
+
+  // The sender picks 1, 5, 10 or 24 hours. HOLD_SECONDS sets the default and, if it is not one of those
+  // (say 120 while testing), is offered as an extra choice.
+  const holdOptions = [...new Set([...STANDARD_HOLD_OPTIONS, holdSeconds])].sort((a, b) => a - b);
 
   // Only a local install may save its client ID from the browser. A hosted one reads it from the environment.
   const configFile = dataDir ? path.join(dataDir, 'config.json') : null;
@@ -209,13 +218,14 @@ export function createApp(options) {
       status: t.status,
       direction: outgoing ? 'out' : 'in',
       counterparty: outgoing ? t.to_name : t.from_name,
+      holdSeconds: t.hold_seconds ?? (t.sent_at == null ? null : t.expires_at - t.sent_at),
       sentAt: t.sent_at,
       expiresAt: t.expires_at,
-      recallAt: t.expires_at == null ? null : t.expires_at + graceSeconds,
+      // Unaccepted credits go back to the sender once the window and the grace period have passed.
+      returnsAt: t.expires_at == null ? null : t.expires_at + graceSeconds,
       closedAt: t.closed_at,
       canAccept: t.status === 'held' && t.to_user === me.id && time < t.expires_at,
       canDecline: t.status === 'held' && t.to_user === me.id,
-      canRecall: t.status === 'held' && outgoing && time >= t.expires_at + graceSeconds,
     };
   }
 
@@ -269,21 +279,38 @@ export function createApp(options) {
 
   const failApproval = async (id, message) => query('closeApproval', 'failed', message, now(), id);
 
+  /**
+   * Sends back every hand-over whose accept window (plus grace) has closed: the rule the sender
+   * signed. It runs before each signed-in request, so nobody ever sees a balance that still
+   * counts an expired hand-over; no scheduler is needed.
+   */
+  async function returnExpired() {
+    const time = now();
+    const closed = await transaction(async q => {
+      const replaced = (await q('cancelExpiredApprovals', time, graceSeconds)).rows;
+      for (const t of (await q('returnExpired', time, graceSeconds)).rows) await q('credit', t.amount, t.from_user);
+      return replaced;
+    });
+    cancelRemote(closed);
+  }
+
   /** The approvals API names people as `pairwise:<client id>:<subject>`, as in the Veyns guide. */
   const approvalSubject = sub => (sub.startsWith('pairwise:') ? sub : `pairwise:${clientId}:${sub}`);
 
   /** Creates the exact action a person will approve, replacing any earlier open approval for the same hand-over. */
   async function newApproval(transfer, user, kind) {
+    // The return rule is part of what the sender signs: the window is in the statement and the digest.
+    const window = transfer.hold_seconds ?? holdSeconds;
     const statement = kind === 'send'
-      ? `Hand over ${fmt(transfer.amount)} credits to ${transfer.to_name}`
+      ? `Hand over ${fmt(transfer.amount)} credits to ${transfer.to_name}, returned to you if not accepted within ${humanDuration(window)}`
       : `Accept ${fmt(transfer.amount)} credits from ${transfer.from_name}`;
     const details = {
       transfer: transfer.id,
       amount: transfer.amount,
       unit: 'credits',
       ...(kind === 'send'
-        ? { to: transfer.to_name, accept_within: humanDuration(holdSeconds) }
-        : { from: transfer.from_name }),
+        ? { to: transfer.to_name, accept_within: humanDuration(window), accept_within_seconds: window, if_not_accepted: 'returned to sender' }
+        : { from: transfer.from_name, accept_by: new Date(transfer.expires_at * 1000).toISOString() }),
       ...(transfer.note ? { note: transfer.note } : {}),
     };
     const id = randomId(16);
@@ -310,7 +337,7 @@ export function createApp(options) {
           throw new HttpError(409, 'This approval was already used.');
         }
         if (a.kind === 'send') {
-          const held = (await q('markHeld', time, time + holdSeconds, a.transfer_id)).rows[0];
+          const held = (await q('markHeld', time, holdSeconds, a.transfer_id)).rows[0];
           if (!held) throw new HttpError(409, 'This hand-over was already sent or discarded.');
           if ((await q('debit', held.amount, held.from_user)).count !== 1) {
             throw new HttpError(409, 'You no longer have enough credits for this.');
@@ -361,6 +388,7 @@ export function createApp(options) {
       palmEnabled: veyns.palmEnabled(),
       requirePalm,
       holdSeconds,
+      holdOptions: holdOptions.map(seconds => ({ seconds, label: humanDuration(seconds) })),
       graceSeconds,
     };
   }
@@ -429,7 +457,7 @@ export function createApp(options) {
   async function saveProfile({ user, body }) {
     const name = String(body.name ?? '').replace(/\s+/g, ' ').trim();
     // eslint-disable-next-line no-control-regex
-    if (name.length < 1 || name.length > 40 || /[ -]/.test(name)) {
+    if (name.length < 1 || name.length > 40 || /[\u0000-\u001f\u007f]/.test(name)) {
       throw new HttpError(400, 'Use a name between 1 and 40 characters.');
     }
     await query('setName', name, user.id);
@@ -444,15 +472,17 @@ export function createApp(options) {
     if (amount > user.balance) throw new HttpError(409, `You have ${fmt(user.balance)} credits.`);
     const note = String(body.note ?? '').replace(/\s+/g, ' ').trim();
     if (note.length > 80) throw new HttpError(400, 'Keep the note under 80 characters.');
+    const window = body.holdSeconds === undefined ? holdSeconds : Number(body.holdSeconds);
+    if (!holdOptions.includes(window)) {
+      throw new HttpError(400, `Choose how long they have to accept: ${holdOptions.map(humanDuration).join(', ')}.`);
+    }
 
     const id = randomId(12);
     const time = now();
     const replaced = await transaction(async q => {
-      const closed = [];
-      for (const draft of (await q('discardDrafts', time, user.id)).rows) {
-        closed.push(...(await q('cancelOpenApprovals', time, draft.id)).rows);
-      }
-      await q('insertTransfer', id, user.id, to.id, amount, note, time);
+      const closed = (await q('cancelDraftApprovals', time, user.id)).rows;
+      await q('discardDrafts', time, user.id);
+      await q('insertTransfer', id, user.id, to.id, amount, note, window, time);
       return closed;
     });
     cancelRemote(replaced);
@@ -474,23 +504,19 @@ export function createApp(options) {
     }
 
     const close = (from, to, refund) => transaction(async q => {
+      const replaced = (await q('cancelOpenApprovals', time, t.id)).rows;
       if ((await q('closeTransfer', to, time, t.id, from)).count !== 1) throw new HttpError(409, 'This hand-over has already been settled.');
       if (refund) await q('credit', t.amount, t.from_user);
-      return (await q('cancelOpenApprovals', time, t.id)).rows;
+      return replaced;
     });
 
     let replaced;
     if (action === 'discard') {
       if (t.status !== 'draft' || t.from_user !== user.id) throw new HttpError(409, 'Only an unsent draft can be discarded.');
       replaced = await close('draft', 'discarded', false);
-    } else if (action === 'decline') {
+    } else {
       if (t.status !== 'held' || t.to_user !== user.id) throw new HttpError(409, 'Only a hand-over waiting for you can be declined.');
       replaced = await close('held', 'declined', true);
-    } else {
-      if (t.status !== 'held' || t.from_user !== user.id) throw new HttpError(409, 'Only a hand-over still waiting can be recalled.');
-      const opensAt = t.expires_at + graceSeconds;
-      if (time < opensAt) throw new HttpError(409, `You can recall this ${inAbout(opensAt - time)}.`);
-      replaced = await close('held', 'recalled', true);
     }
     cancelRemote(replaced);
     return { transfer: transferView(await one('transferById', t.id), user) };
@@ -620,7 +646,7 @@ export function createApp(options) {
     { method: 'GET', path: '/api/me', handler: me, auth: true },
     { method: 'POST', path: '/api/profile', handler: saveProfile, auth: true },
     { method: 'POST', path: '/api/transfers', handler: createTransfer, auth: true },
-    { method: 'POST', path: /^\/api\/transfers\/([\w-]{8,64})\/(approval|discard|decline|recall)$/, handler: transferAction, auth: true },
+    { method: 'POST', path: /^\/api\/transfers\/([\w-]{8,64})\/(approval|discard|decline)$/, handler: transferAction, auth: true },
     { method: 'GET', path: /^\/api\/approvals\/([\w-]{8,64})$/, handler: readApproval, auth: true },
     { method: 'POST', path: /^\/api\/approvals\/([\w-]{8,64})\/(browser|palm|cancel)$/, handler: approvalAction, auth: true },
   ];
@@ -697,6 +723,7 @@ export function createApp(options) {
         throw new HttpError(403, `Open the app at ${publicOrigin}.`);
       }
       const cookies = parseCookies(req.headers.cookie);
+      if (route.auth && cookies[SESSION_COOKIE]) await returnExpired();
       const ctx = {
         params: route.params,
         cookies,

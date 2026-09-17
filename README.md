@@ -2,7 +2,7 @@
 
 A small app built on the Veyns sandbox. You hand play-money credits to someone and approve it with Veyns. They have 24 hours to accept with their own Veyns approval (browser or palm). If they don't, you recall the credits.
 
-Node 24, no build step. Data lives in Postgres. Locally that's PGlite (Postgres running inside Node, stored in `data/pgdata`); on Vercel it's a hosted Postgres database.
+Node 24, no build step. Data lives in Postgres. Locally that's PGlite (Postgres running inside Node, stored in `data/pgdata`), or `HANDOVER_DATABASE_URL` if you set it. On Vercel it's the project's `DATABASE_URL`. The local server deliberately ignores `DATABASE_URL`, so a machine-wide variable from another project is never used.
 
 ## Run it
 

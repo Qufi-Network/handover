@@ -23,8 +23,9 @@ const app = createApp({
   clientId: env.VEYNS_CLIENT_ID || '',
   backendSecret: env.VEYNS_BACKEND_SECRET || '',
   requirePalm: env.REQUIRE_PALM === 'true',
-  // Without DATABASE_URL, a local PGlite database lives in data/pgdata.
-  databaseUrl: env.DATABASE_URL || '',
+  // Deliberately not DATABASE_URL: on a dev machine that often belongs to another project.
+  // Without HANDOVER_DATABASE_URL, a local PGlite database lives in data/pgdata.
+  databaseUrl: env.HANDOVER_DATABASE_URL || '',
   holdSeconds: Number(env.HOLD_SECONDS || 86_400),
   graceSeconds: Number(env.GRACE_SECONDS || 300),
   startingCredits: Number(env.STARTING_CREDITS || 1000),

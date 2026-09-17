@@ -50,7 +50,7 @@ function holdText(seconds) {
 }
 
 function friendly(error) {
-  if (error?.code === 'popup_blocked') return 'Your browser blocked the Veyns window. Allow pop-ups for this site, then try again.';
+  if (error?.code === 'popup_blocked') return 'Your browser blocked the Veyns window. Allow pop-ups for this site, or approve with palm.';
   // Veyns answers an unregistered origin with an HTML page, which the SDK fails to parse as JSON.
   if (error instanceof SyntaxError) return `Veyns refused this site. Register ${location.origin} exactly as a website origin in the Veyns console.`;
   return error?.message || 'Something went wrong.';
@@ -97,7 +97,14 @@ async function boot() {
     document.querySelectorAll('[data-hold]').forEach(node => { node.textContent = holdText(state.config.holdSeconds); });
     if (!state.config.configured) return showSetup();
     loadSdk().catch(() => {});
+    let redirectError = '';
+    try {
+      await finishRedirectSignIn();
+    } catch (error) {
+      redirectError = friendly(error);
+    }
     await refresh();
+    if (redirectError) $('signin-error').textContent = redirectError;
   } catch (error) {
     $('loading-text').textContent = friendly(error);
     $('retry').hidden = false;
@@ -194,9 +201,99 @@ async function signIn(method) {
     await api('/api/login/finish', { token });
     await refresh();
   } catch (error) {
-    if (error.code !== 'cancelled') $('signin-error').textContent = friendly(error);
+    if (error.code === 'popup_blocked') {
+      // Phones' in-app browsers and strict pop-up settings: run the same sign-in in this tab instead.
+      try {
+        $('signin-error').textContent = 'Opening Veyns in this tab…';
+        await signInWithRedirect(method, nonce);
+        return;
+      } catch (redirectError) {
+        $('signin-error').textContent = friendly(redirectError);
+      }
+    } else if (error.code !== 'cancelled') {
+      $('signin-error').textContent = friendly(error);
+    }
     await showSignin();
   }
+}
+
+/* ------------------------------------------- sign-in without a pop-up */
+
+const REDIRECT_KEY = 'handover.veyns-redirect';
+
+function randomToken(bytes) {
+  const buffer = crypto.getRandomValues(new Uint8Array(bytes));
+  return btoa(String.fromCharCode(...buffer)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sha256Base64Url(text) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  return btoa(String.fromCharCode(...digest)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * The same authorization code + PKCE flow veyns.js runs in its pop-up, with response_mode=query:
+ * Veyns sends the whole tab back to the registered redirect URI. The server nonce (bound to this
+ * browser by cookie) is unchanged, so /api/login/finish checks the result exactly as before.
+ */
+async function signInWithRedirect(method, nonce) {
+  const { issuer, clientId, redirectUri } = state.config;
+  const verifier = randomToken(48);
+  const flowState = randomToken(16);
+  try {
+    sessionStorage.setItem(REDIRECT_KEY, JSON.stringify({ state: flowState, verifier }));
+  } catch {
+    throw new Error('This browser blocks both pop-ups and storage. Open the site in Chrome, Edge or Safari.');
+  }
+  const response = await fetch(`${issuer}/v1/authorize/prepare`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      response_type: 'code', response_mode: 'query', client_id: clientId, redirect_uri: redirectUri,
+      scope: 'openid login', intent: 'login', state: flowState, nonce,
+      code_challenge: await sha256Base64Url(verifier), code_challenge_method: 'S256',
+      ...(method === 'palm' ? { required_method: 'palm' } : {}),
+    }),
+  });
+  const prepared = await response.json();
+  if (!response.ok) throw new Error(prepared.error_description || 'Veyns could not start sign-in.');
+  const target = new URL(prepared.authorization_url);
+  if (target.origin !== new URL(issuer).origin || target.pathname !== '/authorize') throw new Error('Veyns returned an unexpected sign-in address.');
+  location.assign(target.href);
+}
+
+/** On the way back from Veyns: exchange the code for an ID token and hand it to the server. */
+async function finishRedirectSignIn() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has('state') || !(params.has('code') || params.has('error'))) return;
+  history.replaceState(null, '', location.pathname); // never leave the code in the address bar or history
+
+  let saved = null;
+  try {
+    saved = JSON.parse(sessionStorage.getItem(REDIRECT_KEY));
+    sessionStorage.removeItem(REDIRECT_KEY);
+  } catch {
+    // Handled below.
+  }
+  if (!saved || saved.state !== params.get('state')) throw new Error('That sign-in did not start in this tab. Please try again.');
+  if (params.has('error')) {
+    throw new Error(params.get('error') === 'access_denied' ? 'Sign-in was cancelled.' : params.get('error_description') || 'Veyns could not sign you in.');
+  }
+
+  const { issuer, clientId, redirectUri } = state.config;
+  const discovery = await (await fetch(`${issuer}/.well-known/openid-configuration`)).json();
+  if (new URL(discovery.token_endpoint).origin !== new URL(issuer).origin) throw new Error('Veyns returned an unexpected token address.');
+  const response = await fetch(discovery.token_endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code', code: params.get('code'), client_id: clientId,
+      redirect_uri: redirectUri, code_verifier: saved.verifier,
+    }),
+  });
+  const tokens = await response.json();
+  if (!response.ok) throw new Error(tokens.error_description || 'Veyns could not finish sign-in. Please try again.');
+  await api('/api/login/finish', { token: tokens.id_token });
 }
 
 $('signin-browser').addEventListener('click', () => signIn('browser'));

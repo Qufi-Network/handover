@@ -269,6 +269,9 @@ export function createApp(options) {
 
   const failApproval = async (id, message) => query('closeApproval', 'failed', message, now(), id);
 
+  /** The approvals API names people as `pairwise:<client id>:<subject>`, as in the Veyns guide. */
+  const approvalSubject = sub => (sub.startsWith('pairwise:') ? sub : `pairwise:${clientId}:${sub}`);
+
   /** Creates the exact action a person will approve, replacing any earlier open approval for the same hand-over. */
   async function newApproval(transfer, user, kind) {
     const statement = kind === 'send'
@@ -508,12 +511,21 @@ export function createApp(options) {
     if (action === 'palm') {
       if (!veyns.palmEnabled()) throw new HttpError(400, 'Palm approvals are not set up. Add VEYNS_BACKEND_SECRET.');
       if (a.request_id) return { approval: approvalView(a) };
-      const remote = await veyns.backend('/v1/approvals', {
-        subject: user.sub,
-        idempotency_key: a.id,
-        expires_in: PALM_REQUEST_SECONDS,
-        action: { statement: a.statement, details: JSON.parse(a.details) },
-      });
+      const subject = approvalSubject(user.sub);
+      let remote;
+      try {
+        remote = await veyns.backend('/v1/approvals', {
+          subject,
+          idempotency_key: a.id,
+          expires_in: PALM_REQUEST_SECONDS,
+          action: { statement: a.statement, details: JSON.parse(a.details) },
+        }, { 'idempotency-key': a.id });
+      } catch (error) {
+        if (error.status !== 400) throw error;
+        // Say what shape was sent (never the whole subject) so a refusal can be diagnosed from the screen.
+        throw new HttpError(400, `Veyns refused the palm request: ${error.message} `
+          + `(subject sent as "${subject.slice(0, 12)}…", ${subject.length} characters; key ${a.id.length} characters)`);
+      }
       if (remote.action?.digest !== a.digest) {
         await failApproval(a.id, 'Veyns described a different action.');
         cancelRemote([remote]);
@@ -578,7 +590,7 @@ export function createApp(options) {
       throw error; // Keys unreachable: leave the approval open and try again on the next poll.
     }
     const problem =
-      claims.sub !== user.sub ? 'different account'
+      claims.sub !== user.sub && claims.sub !== approvalSubject(user.sub) ? 'different account'
       : claims.request_id !== a.request_id ? 'different request'
       : claims.request_nonce !== a.challenge ? 'different challenge'
       : claims.veyns_intent !== 'action' ? 'not an approval'

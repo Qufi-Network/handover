@@ -39,6 +39,8 @@ function mockIssuer(clock) {
       return json(401, { error: 'invalid_client' });
     }
     if (method === 'POST' && pathname === '/v1/approvals') {
+      log.approvalHeaders = init.headers;
+      if (mock.refuseApprovals) return json(400, { error: 'invalid_request', error_description: mock.refuseApprovals });
       const id = crypto.randomBytes(18).toString('base64url');
       const record = {
         request_id: id, subject: body.subject, status: 'pending', required_method: 'palm', kind: 'approval',
@@ -78,7 +80,8 @@ function mockIssuer(clock) {
     });
   }
 
-  return { fetch, token, approvePalm, log };
+  const mock = { fetch, token, approvePalm, log, refuseApprovals: null };
+  return mock;
 }
 
 async function start(t, overrides = {}) {
@@ -264,7 +267,8 @@ test('hand over with a browser approval, accept with a palm approval', async t =
   const started = ok(await bob.post(`/api/approvals/${accept.id}/palm`));
   assert.match(started.approval.approvalUrl, /\/approve#/);
   const requestId = env.issuer.log.created.at(-1).request_id;
-  assert.equal(env.issuer.log.created.at(-1).subject, 'sub-bob');
+  assert.equal(env.issuer.log.created.at(-1).subject, 'pairwise:handover-test:sub-bob');
+  assert.equal(env.issuer.log.approvalHeaders['idempotency-key'], accept.id);
   assert.equal(ok(await bob.get(`/api/approvals/${accept.id}`)).approval.status, 'open');
 
   env.issuer.approvePalm(requestId);
@@ -297,6 +301,33 @@ test('REQUIRE_PALM refuses browser sign-in and browser approvals', async t => {
   env.issuer.approvePalm(env.issuer.log.created.at(-1).request_id);
   assert.equal(ok(await c.get(`/api/approvals/${approval.id}`)).approval.status, 'approved');
   assert.equal(ok(await c.get('/api/me')).user.balance, 990);
+});
+
+test('a refused palm request says what was sent, keeps the approval open, and never doubles the prefix', async t => {
+  const { env, alice, bob, bobId } = await twoPeople(t);
+  const held = await sendAndApprove(env, alice, 'sub-alice', bobId, 100);
+  const { approval } = ok(await bob.post(`/api/transfers/${held.id}/approval`));
+
+  env.issuer.refuseApprovals = 'Provide the application subject and an idempotency key.';
+  const refused = await bob.post(`/api/approvals/${approval.id}/palm`);
+  assert.equal(refused.status, 400);
+  assert.match(refused.body.error, /Provide the application subject.*subject sent as "pairwise:han…", 30 characters; key 22 characters/);
+  assert.equal(ok(await bob.get(`/api/approvals/${approval.id}`)).approval.status, 'open');
+
+  env.issuer.refuseApprovals = null;
+  ok(await bob.post(`/api/approvals/${approval.id}/palm`));
+  env.issuer.approvePalm(env.issuer.log.created.at(-1).request_id);
+  assert.equal(ok(await bob.get(`/api/approvals/${approval.id}`)).approval.status, 'approved');
+
+  // A subject that already carries the pairwise prefix is sent unchanged.
+  const carol = env.client();
+  const { nonce } = ok(await carol.post('/api/login/start'));
+  ok(await carol.post('/api/login/finish', { token: env.issuer.token({ sub: 'pairwise:handover-test:carol', nonce, veyns_intent: 'login' }) }));
+  ok(await carol.post('/api/profile', { name: 'Carol' }));
+  const carolId = ok(await carol.get('/api/me')).user.id;
+  const draft = ok(await carol.post('/api/transfers', { to: carolId, amount: 5 }));
+  ok(await carol.post(`/api/approvals/${draft.approval.id}/palm`));
+  assert.equal(env.issuer.log.created.at(-1).subject, 'pairwise:handover-test:carol');
 });
 
 test('a palm decision that is not a palm scan is refused', async t => {

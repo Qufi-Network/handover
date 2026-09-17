@@ -91,14 +91,14 @@ export function createVeyns({ issuer, getClientId, backendSecret, now, fetchImpl
   }
 
   /** Calls the Veyns backend API with the app's Basic credential. */
-  async function backend(pathname, body) {
+  async function backend(pathname, body, extraHeaders = {}) {
     if (!backendSecret) throw new HttpError(400, 'Palm approvals need VEYNS_BACKEND_SECRET in .env.');
     const authorization = 'Basic ' + Buffer.from(`${getClientId()}:${backendSecret}`).toString('base64');
     let response;
     try {
       response = await fetchImpl(issuer + pathname, {
         method: body === undefined ? 'GET' : 'POST',
-        headers: { authorization, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+        headers: { ...extraHeaders, authorization, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
       });

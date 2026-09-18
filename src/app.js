@@ -299,6 +299,42 @@ export function createApp(options) {
   /** The approvals API names people as `pairwise:<client id>:<subject>`, as in the Veyns guide. */
   const approvalSubject = sub => (sub.startsWith('pairwise:') ? sub : `pairwise:${clientId}:${sub}`);
 
+  // Which naming the service actually accepted, remembered per instance so only the first request pays for both.
+  let subjectForm = null;
+
+  /**
+   * Asks Veyns for a palm request. The guide writes the subject as `pairwise:<client>:<sub>`,
+   * but the service has accepted the bare token subject too, so try both rather than guess.
+   * Each attempt gets its own idempotency key: the same key with different input is a conflict.
+   */
+  async function createPalmRequest(a, user) {
+    const forms = [
+      { name: 'pairwise', subject: approvalSubject(user.sub), key: a.id },
+      { name: 'plain', subject: user.sub, key: `${a.id}-plain` },
+    ].filter(form => (subjectForm ? form.name === subjectForm : true));
+    if (forms.length === 2 && forms[0].subject === forms[1].subject) forms.pop();
+
+    const refusals = [];
+    for (const form of forms) {
+      try {
+        const remote = await veyns.backend('/v1/approvals', {
+          subject: form.subject,
+          idempotency_key: form.key,
+          expires_in: PALM_REQUEST_SECONDS,
+          action: { statement: a.statement, details: JSON.parse(a.details) },
+        }, { 'idempotency-key': form.key });
+        subjectForm = form.name;
+        return remote;
+      } catch (error) {
+        if (error.status !== 400) throw error;
+        refusals.push(`${form.name} (${form.subject.length} characters): ${error.message}`);
+      }
+    }
+    subjectForm = null;
+    throw new HttpError(400, `Veyns refused the palm request both ways. ${refusals.join(' — ')} `
+      + 'Check that this account has its palm scanner connected and is admitted to the palm pilot.');
+  }
+
   /** Creates the exact action a person will approve, replacing any earlier open approval for the same hand-over. */
   async function newApproval(transfer, user, kind) {
     // The return rule is part of what the sender signs: the window is in the statement and the digest.
@@ -540,21 +576,7 @@ export function createApp(options) {
     if (action === 'palm') {
       if (!veyns.palmEnabled()) throw new HttpError(400, 'Palm approvals are not set up. Add VEYNS_BACKEND_SECRET.');
       if (a.request_id) return { approval: approvalView(a) };
-      const subject = approvalSubject(user.sub);
-      let remote;
-      try {
-        remote = await veyns.backend('/v1/approvals', {
-          subject,
-          idempotency_key: a.id,
-          expires_in: PALM_REQUEST_SECONDS,
-          action: { statement: a.statement, details: JSON.parse(a.details) },
-        }, { 'idempotency-key': a.id });
-      } catch (error) {
-        if (error.status !== 400) throw error;
-        // Say what shape was sent (never the whole subject) so a refusal can be diagnosed from the screen.
-        throw new HttpError(400, `Veyns refused the palm request: ${error.message} `
-          + `(subject sent as "${subject.slice(0, 12)}…", ${subject.length} characters; key ${a.id.length} characters)`);
-      }
+      const remote = await createPalmRequest(a, user);
       if (remote.action?.digest !== a.digest) {
         await failApproval(a.id, 'Veyns described a different action.');
         cancelRemote([remote]);

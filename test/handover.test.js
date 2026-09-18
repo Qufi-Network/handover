@@ -40,7 +40,8 @@ function mockIssuer(clock) {
     }
     if (method === 'POST' && pathname === '/v1/approvals') {
       log.approvalHeaders = init.headers;
-      if (mock.refuseApprovals) return json(400, { error: 'invalid_request', error_description: mock.refuseApprovals });
+      const refusal = mock.refuseApprovals ?? (mock.refusePairwise && body.subject.startsWith('pairwise:') ? mock.refusePairwise : null);
+      if (refusal) return json(400, { error: 'invalid_request', error_description: refusal });
       const id = crypto.randomBytes(18).toString('base64url');
       const record = {
         request_id: id, subject: body.subject, status: 'pending', required_method: 'palm', kind: 'approval',
@@ -80,7 +81,7 @@ function mockIssuer(clock) {
     });
   }
 
-  const mock = { fetch, token, approvePalm, log, refuseApprovals: null };
+  const mock = { fetch, token, approvePalm, log, refuseApprovals: null, refusePairwise: null };
   return mock;
 }
 
@@ -328,7 +329,7 @@ test('a refused palm request says what was sent, keeps the approval open, and ne
   env.issuer.refuseApprovals = 'Provide the application subject and an idempotency key.';
   const refused = await bob.post(`/api/approvals/${approval.id}/palm`);
   assert.equal(refused.status, 400);
-  assert.match(refused.body.error, /Provide the application subject.*subject sent as "pairwise:han…", 30 characters; key 22 characters/);
+  assert.match(refused.body.error, /refused the palm request both ways.*pairwise \(30 characters\).*plain \(7 characters\).*palm pilot/s);
   assert.equal(ok(await bob.get(`/api/approvals/${approval.id}`)).approval.status, 'open');
 
   env.issuer.refuseApprovals = null;
@@ -345,6 +346,22 @@ test('a refused palm request says what was sent, keeps the approval open, and ne
   const draft = ok(await carol.post('/api/transfers', { to: carolId, amount: 5 }));
   ok(await carol.post(`/api/approvals/${draft.approval.id}/palm`));
   assert.equal(env.issuer.log.created.at(-1).subject, 'pairwise:handover-test:carol');
+});
+
+test('when Veyns refuses the pairwise subject, the plain one is used instead', async t => {
+  const { env, alice, bob, bobId } = await twoPeople(t);
+  const held = await sendAndApprove(env, alice, 'sub-alice', bobId, 100);
+  env.issuer.refusePairwise = 'Provide the application subject and an idempotency key.';
+
+  const { approval } = ok(await bob.post(`/api/transfers/${held.id}/approval`));
+  ok(await bob.post(`/api/approvals/${approval.id}/palm`));
+  const request = env.issuer.log.created.at(-1);
+  assert.equal(request.subject, 'sub-bob', 'fell back to the subject from the token');
+  assert.equal(env.issuer.log.approvalHeaders['idempotency-key'], `${approval.id}-plain`, 'the retry uses its own key');
+
+  env.issuer.approvePalm(request.request_id);
+  assert.equal(ok(await bob.get(`/api/approvals/${approval.id}`)).approval.status, 'approved');
+  assert.equal(ok(await bob.get('/api/me')).user.balance, 1100);
 });
 
 test('a palm decision that is not a palm scan is refused', async t => {
